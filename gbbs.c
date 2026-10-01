@@ -1,4 +1,9 @@
 /*
+ * SPDX-License-Identifier: GPL-2.0-only
+ * Copyright (C) 2026 EB-TNAP
+ * Licensed under the GNU General Public License, version 2 only (GPL-2.0-only).
+ * See the LICENSE file in the source tree.
+ *
  * gbbs v3 - open replacement for GigaBlue's closed "gigablue_blindscan" wrapper.
  *
  * Reverse engineered from gigablue-blindscan-dvbs-utils-arm 4.0-r13 and the GigaBlue

@@ -95,3 +95,14 @@ Install it as `/usr/bin/gbbs`.
 - PLS codes are not reported, so scrambled-PLS multistream will not lock.
 - The FBC peak-scan path is limited by the driver to large-SR carriers. The
   FBC tuners are better left excluded from blindscan.
+
+## License
+
+gbbs is free software, licensed under the GNU General Public License,
+version 2 only (GPL-2.0-only). See [LICENSE](LICENSE).
+
+## Download
+
+A prebuilt static ARMv7 binary is attached to each
+[release](../../releases). Copy it to `/usr/bin/gbbs` on the receiver and make
+it executable.
