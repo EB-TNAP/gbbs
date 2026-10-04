@@ -79,16 +79,21 @@ from a plugin hides them.
 
 The firmware seek detects narrow carriers only some of the time, and a
 stalled seek loses the rest of its span. So the second pass seeks in short
-overlapping chunks (`GBBS_LOWSR_CHUNK`, default 40 MHz), each with its own
-stall limit (`GBBS_LOWSR_TIMEOUT`, default 45 s), and can be repeated
+overlapping chunks (`GBBS_LOWSR_CHUNK`, default 40 MHz), and can be repeated
 (`GBBS_LOWSR_REPEAT`, default 1).
+
+A seek step that returns nothing within `GBBS_TIMEOUT` / `GBBS_LOWSR_TIMEOUT`
+seconds (default 125, just past the driver's own 120 s limit per step) is
+resumed with another seek-next rather than abandoning the pass, up to
+`GBBS_KICKS` times (default 3). Carriers reported 1 MHz apart at the same
+symbol rate (whole-MHz rounding) are reported once.
 
 Tuning what the second pass finds needs GigaBlue's `dvb.ko` patched to lower
 its registered `symbol_rate_min` (vendor value 1000000); otherwise the kernel
 rejects the tune with `symbol rate … out of range`.
 
 Environment: `GBBS_DEBUG=1` (trace on stderr), `GBBS_TIMEOUT=s` (seek path,
-per carrier, default 180), `GBBS_SRMIN_KSPS=k` (seek path, override the
+seconds without a result before resuming, default 125), `GBBS_KICKS=n`, `GBBS_SRMIN_KSPS=k` (seek path, override the
 minimum symbol rate in kS/s), `GBBS_LOWSR=0` (skip the sub-1 MS/s pass),
 `GBBS_STEP=MHz`, `GBBS_FE=n`, `GBBS_FORCE=1` (peak-scan path).
 

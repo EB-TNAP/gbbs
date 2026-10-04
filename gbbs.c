@@ -4,7 +4,7 @@
  * Licensed under the GNU General Public License, version 2 only (GPL-2.0-only).
  * See the LICENSE file in the source tree.
  *
- * gbbs v4.1 - open replacement for GigaBlue's closed "gigablue_blindscan" wrapper.
+ * gbbs v4.2 - open replacement for GigaBlue's closed "gigablue_blindscan" wrapper.
  *
  * Reverse engineered from gigablue-blindscan-dvbs-utils-arm 4.0-r13 and the GigaBlue
  * 7252 dvb.ko (BuildID e7395bbeb437a240...). The work is done in dvb.ko's
@@ -32,11 +32,13 @@
  * Sockets named TS3L10/TS2L08 use the SiLabs seek engine (see seek_scan below);
  * FBC/BCM sockets use the Nexus peak-scan path.
  * Environment:
- *   GBBS_TIMEOUT=s  seek path: max seconds to wait for one carrier (default 180)
+ *   GBBS_TIMEOUT=s  seek path: seconds without a result before resuming the
+ *                   seek (default 125, just past the driver's 120 s step)
+ *   GBBS_KICKS=n    seek path: resumes before a stalled pass is abandoned (default 3)
  *   GBBS_SRMIN_KSPS=k  seek path: override the minimum symbol rate in ks/s (e.g. 250)
  *   GBBS_LOWSR=0    seek path: don't run the separate sub-1 Msps pass
  *   GBBS_LOWSR_CHUNK=MHz    sub-1 Msps pass: seek this many MHz at a time (default 40)
- *   GBBS_LOWSR_TIMEOUT=s    sub-1 Msps pass: per-chunk stall limit (default 45)
+ *   GBBS_LOWSR_TIMEOUT=s    sub-1 Msps pass: as GBBS_TIMEOUT, for the low pass (default 125)
  *   GBBS_LOWSR_REPEAT=n     sub-1 Msps pass: run the whole low pass n times (default 1)
  *   GBBS_STEP=MHz   step between peak-scan centres (default 2)
  *   GBBS_FE=n       force frontend index (default: feid argument)
@@ -162,6 +164,12 @@ static int seen(unsigned f_khz, unsigned sr)
 	for (i = 0; i < nhits; i++) {
 		unsigned half = (hits[i].sr > sr ? hits[i].sr : sr) / 2000; /* kHz */
 		unsigned d = f_khz > hits[i].f_khz ? f_khz - hits[i].f_khz : hits[i].f_khz - f_khz;
+		unsigned dsr = hits[i].sr > sr ? hits[i].sr - sr : sr - hits[i].sr;
+		/* The seek engine reports whole MHz, so the same narrow carrier can
+		 * come back 1 MHz apart (11852 / 11853 at 593 kS/s). Same SR within
+		 * 2% and <= 1 MHz apart is the same carrier. */
+		if (dsr * 50 <= sr && half < 1000)
+			half = 1000;
 		if (d <= half)
 			return 1;
 	}
@@ -212,8 +220,12 @@ static int seek_pass(int fd, int fe, int start, int end, unsigned srmin, unsigne
                      int pol, unsigned lo_khz, int timeout)
 {
 	static struct seek_res r, prev;
-	int ret, found = 0;
+	int ret, found = 0, max_kicks = 3;
 	double t0 = now();
+	const char *e;
+
+	if ((e = getenv("GBBS_KICKS")) != NULL) max_kicks = atoi(e);
+	if (max_kicks < 0) max_kicks = 0;
 
 	ioctl(fd, SEEK_SELECT, (unsigned long)fe);
 	ioctl(fd, SEEK_STOP);          /* clear any session a killed run / earlier pass left */
@@ -235,6 +247,7 @@ static int seek_pass(int fd, int fe, int start, int end, unsigned srmin, unsigne
 
 	while (!stop_req) {
 		double ts = now();
+		int kicks = 0;
 		ioctl(fd, SEEK_NEXT);
 		usleep(150000);          /* let the thread clear the previous result flag */
 		for (;;) {
@@ -246,8 +259,24 @@ static int seek_pass(int fd, int fe, int start, int end, unsigned srmin, unsigne
 			if (ret == 1 && !(r.freq == prev.freq && r.sr == prev.sr))
 				break;
 			if (now() - ts > timeout) {
-				fprintf(stderr, "gbbs: no answer from seek in %d s, stopping pass\n",
-				        timeout);
+				/* Si2183_L2_Channel_Seek_Next allows itself up to 120 s on
+				 * satellite and can end that step without posting a result
+				 * or an end-of-range. Abandoning the pass here threw away
+				 * the rest of the span (and, at a short timeout, a search
+				 * still in progress). Ask for the next step instead: the
+				 * firmware seek continues from where it stopped. */
+				if (kicks < max_kicks) {
+					kicks++;
+					if (dbg)
+						fprintf(stderr, "  no result in %d s, resuming seek (%d/%d)\n",
+						        timeout, kicks, max_kicks);
+					ioctl(fd, SEEK_NEXT);
+					usleep(150000);
+					ts = now();
+					continue;
+				}
+				fprintf(stderr, "gbbs: seek stalled %d x %d s, stopping pass\n",
+				        max_kicks + 1, timeout);
 				goto out;
 			}
 			usleep(200000);
@@ -300,7 +329,7 @@ static int seek_scan(int fe, const char *name, int start, int end, unsigned srmi
                      unsigned srmax, int pol, int band)
 {
 	unsigned lo_khz = band ? 10600000 : 9750000;
-	int timeout = 180, total = 0, n;
+	int timeout = 125, total = 0, n;   /* just past the driver's 120 s seek step */
 	const char *e;
 	double t0 = now();
 
@@ -330,7 +359,7 @@ static int seek_scan(int fe, const char *name, int start, int end, unsigned srmi
 		 * pass works in short overlapping chunks, each with its own Seek_Init
 		 * and a shorter stall limit, optionally repeated; dedup keeps the
 		 * output clean. */
-		int chunk = 40, ltimeout = 45, repeat = 1, rep, c;
+		int chunk = 40, ltimeout = 125, repeat = 1, rep, c;
 		if ((e = getenv("GBBS_LOWSR_CHUNK")) != NULL) chunk = atoi(e);
 		if ((e = getenv("GBBS_LOWSR_TIMEOUT")) != NULL) ltimeout = atoi(e);
 		if ((e = getenv("GBBS_LOWSR_REPEAT")) != NULL) repeat = atoi(e);
@@ -392,7 +421,7 @@ int main(int argc, char **argv)
 		                "       %s probe\n"
 		                "       srmin/srmax in Msps, decimals allowed (0.3 = 300 ks/s)\n"
 		                "env:   GBBS_SRMIN_KSPS=k GBBS_LOWSR=0 GBBS_TIMEOUT=s GBBS_STEP=MHz\n"
-		                "       GBBS_LOWSR_CHUNK=MHz GBBS_LOWSR_TIMEOUT=s GBBS_LOWSR_REPEAT=n\n"
+		                "       GBBS_LOWSR_CHUNK=MHz GBBS_LOWSR_TIMEOUT=s GBBS_LOWSR_REPEAT=n GBBS_KICKS=n\n"
 		                "       GBBS_FE=n GBBS_FORCE=1 GBBS_DEBUG=1\n", argv[0], argv[0]);
 		return 1;
 	}
