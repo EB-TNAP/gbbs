@@ -77,6 +77,12 @@ pass from 1 MS/s up (unchanged), then a separate pass from `sr_min` to
 engine for 1 MS/s and up never reports narrower carriers, so passing `1`
 from a plugin hides them.
 
+The firmware seek detects narrow carriers only some of the time, and a
+stalled seek loses the rest of its span. So the second pass seeks in short
+overlapping chunks (`GBBS_LOWSR_CHUNK`, default 40 MHz), each with its own
+stall limit (`GBBS_LOWSR_TIMEOUT`, default 45 s), and can be repeated
+(`GBBS_LOWSR_REPEAT`, default 1).
+
 Tuning what the second pass finds needs GigaBlue's `dvb.ko` patched to lower
 its registered `symbol_rate_min` (vendor value 1000000); otherwise the kernel
 rejects the tune with `symbol rate … out of range`.

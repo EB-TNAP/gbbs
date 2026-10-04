@@ -4,7 +4,7 @@
  * Licensed under the GNU General Public License, version 2 only (GPL-2.0-only).
  * See the LICENSE file in the source tree.
  *
- * gbbs v4 - open replacement for GigaBlue's closed "gigablue_blindscan" wrapper.
+ * gbbs v4.1 - open replacement for GigaBlue's closed "gigablue_blindscan" wrapper.
  *
  * Reverse engineered from gigablue-blindscan-dvbs-utils-arm 4.0-r13 and the GigaBlue
  * 7252 dvb.ko (BuildID e7395bbeb437a240...). The work is done in dvb.ko's
@@ -35,6 +35,9 @@
  *   GBBS_TIMEOUT=s  seek path: max seconds to wait for one carrier (default 180)
  *   GBBS_SRMIN_KSPS=k  seek path: override the minimum symbol rate in ks/s (e.g. 250)
  *   GBBS_LOWSR=0    seek path: don't run the separate sub-1 Msps pass
+ *   GBBS_LOWSR_CHUNK=MHz    sub-1 Msps pass: seek this many MHz at a time (default 40)
+ *   GBBS_LOWSR_TIMEOUT=s    sub-1 Msps pass: per-chunk stall limit (default 45)
+ *   GBBS_LOWSR_REPEAT=n     sub-1 Msps pass: run the whole low pass n times (default 1)
  *   GBBS_STEP=MHz   step between peak-scan centres (default 2)
  *   GBBS_FE=n       force frontend index (default: feid argument)
  *   GBBS_FORCE=1    skip the "is this a Broadcom/Nexus NIM" safety check
@@ -322,11 +325,33 @@ static int seek_scan(int fe, const char *name, int start, int end, unsigned srmi
 	if (!lowsr) {
 		n = seek_pass(fd, fe, start, end, srmin, srmax, pol, lo_khz, timeout);
 	} else {
+		/* Narrow carriers are detected only some of the time by the firmware
+		 * seek, and a stalled seek forfeits the rest of its span. So the low
+		 * pass works in short overlapping chunks, each with its own Seek_Init
+		 * and a shorter stall limit, optionally repeated; dedup keeps the
+		 * output clean. */
+		int chunk = 40, ltimeout = 45, repeat = 1, rep, c;
+		if ((e = getenv("GBBS_LOWSR_CHUNK")) != NULL) chunk = atoi(e);
+		if ((e = getenv("GBBS_LOWSR_TIMEOUT")) != NULL) ltimeout = atoi(e);
+		if ((e = getenv("GBBS_LOWSR_REPEAT")) != NULL) repeat = atoi(e);
+		if (chunk < 4) chunk = 4;
+		if (ltimeout < 5) ltimeout = 5;
+		if (repeat < 1) repeat = 1;
+
 		n = seek_pass(fd, fe, start, end, LOWSR_SPLIT, srmax, pol, lo_khz, timeout);
-		if (n >= 0 && !stop_req) {
-			total += n;
-			n = seek_pass(fd, fe, start, end, srmin, LOWSR_SPLIT, pol, lo_khz, timeout);
+		if (n < 0) {
+			close(fd);
+			return 1;
 		}
+		total += n;
+		for (rep = 0; rep < repeat && !stop_req; rep++)
+			for (c = start; c < end && !stop_req; c += chunk) {
+				int ce = c + chunk + 2;     /* 2 MHz overlap between chunks */
+				if (ce > end) ce = end;
+				n = seek_pass(fd, fe, c, ce, srmin, LOWSR_SPLIT, pol, lo_khz, ltimeout);
+				if (n > 0) total += n;
+			}
+		n = 0;
 	}
 	close(fd);
 	if (n < 0 && !total)
@@ -367,6 +392,7 @@ int main(int argc, char **argv)
 		                "       %s probe\n"
 		                "       srmin/srmax in Msps, decimals allowed (0.3 = 300 ks/s)\n"
 		                "env:   GBBS_SRMIN_KSPS=k GBBS_LOWSR=0 GBBS_TIMEOUT=s GBBS_STEP=MHz\n"
+		                "       GBBS_LOWSR_CHUNK=MHz GBBS_LOWSR_TIMEOUT=s GBBS_LOWSR_REPEAT=n\n"
 		                "       GBBS_FE=n GBBS_FORCE=1 GBBS_DEBUG=1\n", argv[0], argv[0]);
 		return 1;
 	}
