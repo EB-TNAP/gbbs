@@ -3,7 +3,7 @@
 An open replacement for GigaBlue's closed `gigablue_blindscan` helper. It gives
 the **GigaBlue plug-and-play TS3L10 / TS2L08 DVB-S2X tuners** a working
 blindscan: DVB-S, DVB-S2 and DVB-S2X carriers from 1 to 45 MS/s, including
-multistream ISIs. It does this through the SiLabs firmware channel-seek engine
+multistream ISIs, plus an optional pass for narrow carriers below 1 MS/s. It does this through the SiLabs firmware channel-seek engine
 that is already inside GigaBlue's `dvb.ko` but was never used by anything in
 userspace.
 
@@ -67,9 +67,24 @@ OK VERTICAL 11833000 4998000 DVB-S2X INVERSION_AUTO PILOT_AUTO FEC_3_4 16APSK RO
 gbbs does not switch LNB voltage or tone. The caller must tune the tuner to
 the wanted polarisation and band first, as the Blindscan plugins do.
 
+`sr_min` / `sr_max` are in MS/s and may be decimal (`0.25` = 250 kS/s).
+
+### Narrow carriers (below 1 MS/s)
+
+When `sr_min` is below 1 MS/s, the seek path runs two passes: the normal
+pass from 1 MS/s up (unchanged), then a separate pass from `sr_min` to
+1 MS/s. Carriers found by both are reported once. Asking the SiLabs seek
+engine for 1 MS/s and up never reports narrower carriers, so passing `1`
+from a plugin hides them.
+
+Tuning what the second pass finds needs GigaBlue's `dvb.ko` patched to lower
+its registered `symbol_rate_min` (vendor value 1000000); otherwise the kernel
+rejects the tune with `symbol rate … out of range`.
+
 Environment: `GBBS_DEBUG=1` (trace on stderr), `GBBS_TIMEOUT=s` (seek path,
-per carrier, default 180), `GBBS_STEP=MHz`, `GBBS_FE=n`, `GBBS_FORCE=1`
-(peak-scan path).
+per carrier, default 180), `GBBS_SRMIN_KSPS=k` (seek path, override the
+minimum symbol rate in kS/s), `GBBS_LOWSR=0` (skip the sub-1 MS/s pass),
+`GBBS_STEP=MHz`, `GBBS_FE=n`, `GBBS_FORCE=1` (peak-scan path).
 
 ## Build
 

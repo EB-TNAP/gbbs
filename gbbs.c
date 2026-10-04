@@ -4,7 +4,7 @@
  * Licensed under the GNU General Public License, version 2 only (GPL-2.0-only).
  * See the LICENSE file in the source tree.
  *
- * gbbs v3 - open replacement for GigaBlue's closed "gigablue_blindscan" wrapper.
+ * gbbs v4 - open replacement for GigaBlue's closed "gigablue_blindscan" wrapper.
  *
  * Reverse engineered from gigablue-blindscan-dvbs-utils-arm 4.0-r13 and the GigaBlue
  * 7252 dvb.ko (BuildID e7395bbeb437a240...). The work is done in dvb.ko's
@@ -28,10 +28,13 @@
  * Command line (as sent by the OE-A Blindscan plugin):
  *   gbbs start_if end_if sr_min sr_max pol(0=H 1=V) band(0=lo 1=hi) feid [i2c...]
  *   gbbs probe
+ * sr_min / sr_max are Msps and may be decimal (0.3 = 300 ks/s).
  * Sockets named TS3L10/TS2L08 use the SiLabs seek engine (see seek_scan below);
  * FBC/BCM sockets use the Nexus peak-scan path.
  * Environment:
  *   GBBS_TIMEOUT=s  seek path: max seconds to wait for one carrier (default 180)
+ *   GBBS_SRMIN_KSPS=k  seek path: override the minimum symbol rate in ks/s (e.g. 250)
+ *   GBBS_LOWSR=0    seek path: don't run the separate sub-1 Msps pass
  *   GBBS_STEP=MHz   step between peak-scan centres (default 2)
  *   GBBS_FE=n       force frontend index (default: feid argument)
  *   GBBS_FORCE=1    skip the "is this a Broadcom/Nexus NIM" safety check
@@ -199,41 +202,31 @@ struct seek_res {
 static volatile sig_atomic_t stop_req;
 static void on_sig(int s) { (void)s; stop_req = 1; }
 
-static int seek_scan(int fe, const char *name, int start, int end, int srmin, int srmax,
-                     int pol, int band)
+/* One SiLabs seek over [start, end] MHz IF for symbol rates srmin..srmax (sym/s).
+ * Prints carriers not already reported by an earlier pass. Returns carriers printed,
+ * or -1 if the seek engine could not be started. */
+static int seek_pass(int fd, int fe, int start, int end, unsigned srmin, unsigned srmax,
+                     int pol, unsigned lo_khz, int timeout)
 {
 	static struct seek_res r, prev;
-	unsigned int lo_khz = band ? 10600000 : 9750000;
-	int timeout = 180, ret, found = 0;
-	const char *e;
+	int ret, found = 0;
 	double t0 = now();
 
-	if ((e = getenv("GBBS_TIMEOUT")) != NULL) timeout = atoi(e);
-	signal(SIGINT, on_sig);
-	signal(SIGTERM, on_sig);
-	signal(SIGHUP, on_sig);
-
-	int fd = open("/dev/blindscan0", O_RDWR);
-	if (fd < 0) {
-		fprintf(stderr, "gbbs: open /dev/blindscan0: %s\n", strerror(errno));
-		return 1;
-	}
 	ioctl(fd, SEEK_SELECT, (unsigned long)fe);
-	ioctl(fd, SEEK_STOP);          /* clear any session a killed run left behind */
+	ioctl(fd, SEEK_STOP);          /* clear any session a killed run / earlier pass left */
 
-	struct bs_req req = { (unsigned)start * 1000000u, (unsigned)srmin * 1000000u,
-	                      (unsigned)srmax * 1000000u, (unsigned)(end - start) * 1000000u, 0 };
+	struct bs_req req = { (unsigned)start * 1000000u, srmin, srmax,
+	                      (unsigned)(end - start) * 1000000u, 0 };
 	if (dbg)
-		fprintf(stderr, "gbbs: SEEK fe %d (%s) IF %d-%d MHz SR %d-%d pol %s band %d\n",
-		        fe, name, start, end, srmin, srmax, pol_s[pol], band);
+		fprintf(stderr, "gbbs: SEEK pass fe %d IF %d-%d MHz SR %u-%u ks/s\n",
+		        fe, start, end, srmin / 1000, srmax / 1000);
 	sleep(1);
 	ret = ioctl(fd, SEEK_START, &req);
 	if (ret != 1) {
 		fprintf(stderr, "gbbs: seek start on fe %d returned %d (%s)\n", fe, ret,
 		        ret < 0 ? strerror(errno) : "not a seek-capable NIM");
 		ioctl(fd, SEEK_STOP);
-		close(fd);
-		return 1;
+		return -1;
 	}
 	memset(&prev, 0, sizeof(prev));
 
@@ -250,7 +243,8 @@ static int seek_scan(int fe, const char *name, int start, int end, int srmin, in
 			if (ret == 1 && !(r.freq == prev.freq && r.sr == prev.sr))
 				break;
 			if (now() - ts > timeout) {
-				fprintf(stderr, "gbbs: no answer from seek in %d s, stopping\n", timeout);
+				fprintf(stderr, "gbbs: no answer from seek in %d s, stopping pass\n",
+				        timeout);
 				goto out;
 			}
 			usleep(200000);
@@ -261,9 +255,15 @@ static int seek_scan(int fe, const char *name, int start, int end, int srmin, in
 			        r.freq / 1000, r.sr, r.delsys, r.modulation, r.fec, r.n_isi, now() - ts);
 		if (!r.freq || !r.sr)
 			continue;
-		found++;
 
 		unsigned f_khz = r.freq / 1000 + lo_khz, sr = r.sr / 1000 * 1000;
+		if (seen(f_khz, sr)) {
+			if (dbg)
+				fprintf(stderr, "  dup %u %u\n", f_khz, sr);
+			continue;
+		}
+		found++;
+
 		const char *sys = sys_str(r.delsys);
 		const char *fec = PICK(fec_s, r.fec, "FEC_AUTO"), *mod = mod_str(r.modulation);
 		int i, n = r.n_isi > 1 ? r.n_isi : 0;
@@ -278,16 +278,83 @@ static int seek_scan(int fe, const char *name, int start, int end, int srmin, in
 	}
 out:
 	ioctl(fd, SEEK_STOP);
-	close(fd);
 	if (dbg)
-		fprintf(stderr, "gbbs: seek done, %d carriers, %.0f s%s\n", found, now() - t0,
+		fprintf(stderr, "gbbs: pass SR %u-%u ks/s: %d new carriers, %.0f s%s\n",
+		        srmin / 1000, srmax / 1000, found, now() - t0,
+		        stop_req ? " (interrupted)" : "");
+	return found;
+}
+
+/* The firmware seek with SCAN_SYMB_RATE_MIN at 1 Msps never reports narrower
+ * carriers, and widening one combined pass risks changing what the normal pass
+ * finds. So: the normal pass (>= 1 Msps) exactly as before, then - only if the
+ * caller asked for less than 1 Msps - a separate sub-1 Msps pass. Results are
+ * de-duplicated across passes. The patched dvb.ko (symbol_rate_min lowered)
+ * is needed to tune anything this second pass finds. */
+#define LOWSR_SPLIT 1000000u
+
+static int seek_scan(int fe, const char *name, int start, int end, unsigned srmin,
+                     unsigned srmax, int pol, int band)
+{
+	unsigned lo_khz = band ? 10600000 : 9750000;
+	int timeout = 180, total = 0, n;
+	const char *e;
+	double t0 = now();
+
+	if ((e = getenv("GBBS_TIMEOUT")) != NULL) timeout = atoi(e);
+	signal(SIGINT, on_sig);
+	signal(SIGTERM, on_sig);
+	signal(SIGHUP, on_sig);
+
+	int fd = open("/dev/blindscan0", O_RDWR);
+	if (fd < 0) {
+		fprintf(stderr, "gbbs: open /dev/blindscan0: %s\n", strerror(errno));
+		return 1;
+	}
+	if (dbg)
+		fprintf(stderr, "gbbs: SEEK fe %d (%s) IF %d-%d MHz SR %u-%u ks/s pol %s band %d\n",
+		        fe, name, start, end, srmin / 1000, srmax / 1000, pol_s[pol], band);
+
+	int lowsr = srmin < LOWSR_SPLIT && srmax > LOWSR_SPLIT;
+	if ((e = getenv("GBBS_LOWSR")) != NULL && !atoi(e))
+		lowsr = 0;
+
+	if (!lowsr) {
+		n = seek_pass(fd, fe, start, end, srmin, srmax, pol, lo_khz, timeout);
+	} else {
+		n = seek_pass(fd, fe, start, end, LOWSR_SPLIT, srmax, pol, lo_khz, timeout);
+		if (n >= 0 && !stop_req) {
+			total += n;
+			n = seek_pass(fd, fe, start, end, srmin, LOWSR_SPLIT, pol, lo_khz, timeout);
+		}
+	}
+	close(fd);
+	if (n < 0 && !total)
+		return 1;
+	total += n > 0 ? n : 0;
+	if (dbg)
+		fprintf(stderr, "gbbs: seek done, %d carriers, %.0f s%s\n", total, now() - t0,
 		        stop_req ? " (interrupted)" : "");
 	return 0;
 }
 
+/* Msps argument -> sym/s; accepts "2", "0.3", "0,3". */
+static unsigned parse_msps(const char *s)
+{
+	char buf[32], *c;
+	snprintf(buf, sizeof(buf), "%s", s);
+	if ((c = strchr(buf, ',')) != NULL)
+		*c = '.';
+	double v = atof(buf);
+	if (v < 0)
+		v = 0;
+	return (unsigned)(v * 1e6 + 0.5);
+}
+
 int main(int argc, char **argv)
 {
-	int start = 950, end = 2150, srmin = 2, srmax = 45, pol = 0, band = 0, fe = 0, step = 2;
+	int start = 950, end = 2150, pol = 0, band = 0, fe = 0, step = 2;
+	unsigned srmin = 2000000, srmax = 45000000;   /* sym/s */
 	char name[128] = "";
 	const char *e;
 
@@ -298,19 +365,24 @@ int main(int argc, char **argv)
 	if (argc == 2 && (!strcmp(argv[1], "-h") || !strcmp(argv[1], "--help"))) {
 		fprintf(stderr, "usage: %s start_if end_if srmin srmax pol(0=H,1=V) band(0=lo,1=hi) feid\n"
 		                "       %s probe\n"
-		                "env:   GBBS_STEP=MHz GBBS_FE=n GBBS_FORCE=1 GBBS_DEBUG=1\n", argv[0], argv[0]);
+		                "       srmin/srmax in Msps, decimals allowed (0.3 = 300 ks/s)\n"
+		                "env:   GBBS_SRMIN_KSPS=k GBBS_LOWSR=0 GBBS_TIMEOUT=s GBBS_STEP=MHz\n"
+		                "       GBBS_FE=n GBBS_FORCE=1 GBBS_DEBUG=1\n", argv[0], argv[0]);
 		return 1;
 	}
 	if (argc > 1) start = atoi(argv[1]);
 	if (argc > 2) end   = atoi(argv[2]);
-	if (argc > 3) srmin = atoi(argv[3]);
-	if (argc > 4) srmax = atoi(argv[4]);
+	if (argc > 3) srmin = parse_msps(argv[3]);
+	if (argc > 4) srmax = parse_msps(argv[4]);
 	if (argc > 5) pol   = atoi(argv[5]) ? 1 : 0;
 	if (argc > 6) band  = atoi(argv[6]);
 	if (argc > 7) fe    = atoi(argv[7]);
 	if ((e = getenv("GBBS_FE")) != NULL)   fe = atoi(e);
 	if ((e = getenv("GBBS_STEP")) != NULL) step = atoi(e);
 	if (step < 1) step = 1;
+	if ((e = getenv("GBBS_SRMIN_KSPS")) != NULL) srmin = (unsigned)atoi(e) * 1000u;
+	if (srmin < 100000) srmin = 100000;           /* below this the firmware is guessing */
+	if (srmax < srmin) srmax = srmin;
 
 	/* TS3L10 / TS2L08 plug-in NIMs: SiLabs firmware seek engine */
 	if (nim_name(fe, name, sizeof(name)) == 0 &&
@@ -325,9 +397,9 @@ int main(int argc, char **argv)
 		                "(GBBS_FORCE=1 to override, at your own risk)\n", fe, name);
 		return 1;
 	}
-	if (srmin < 10 || srmax > 30)
+	if (srmin < 10000000 || srmax > 30000000)
 		fprintf(stderr, "gbbs: note: dvb.ko clamps peak scan SR to 10-30 Msps "
-		                "(asked %d-%d)\n", srmin, srmax);
+		                "(asked %.3g-%.3g)\n", srmin / 1e6, srmax / 1e6);
 
 	int fd = open("/dev/blindscan0", O_RDWR);
 	if (fd < 0) {
@@ -337,16 +409,15 @@ int main(int argc, char **argv)
 	if (ioctl(fd, BS_SELECT, (unsigned long)fe))
 		fprintf(stderr, "gbbs: select fe %d: %s\n", fe, strerror(errno));
 	if (dbg)
-		fprintf(stderr, "gbbs: fe %d (%s) IF %d-%d MHz step %d SR %d-%d pol %s band %d\n",
-		        fe, name, start, end, step, srmin, srmax, pol_s[pol], band);
+		fprintf(stderr, "gbbs: fe %d (%s) IF %d-%d MHz step %d SR %.3g-%.3g pol %s band %d\n",
+		        fe, name, start, end, step, srmin / 1e6, srmax / 1e6, pol_s[pol], band);
 	sleep(3); /* stock tool does this too; lets the LNB settle after the plugin's tune */
 
 	unsigned int lo_khz = band ? 10600000 : 9750000;
 	double t0 = now();
 	int f = start;
 	while (f < end) {
-		struct bs_req req = { (unsigned)f * 1000000u, (unsigned)srmin * 1000000u,
-		                      (unsigned)srmax * 1000000u, 0, 0 };
+		struct bs_req req = { (unsigned)f * 1000000u, srmin, srmax, 0, 0 };
 		struct bs_res r;
 		int next = f + step;
 		double ts = now();
