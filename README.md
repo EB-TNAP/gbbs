@@ -56,6 +56,7 @@ blindscan helpers, so gbbs is a drop-in:
 ```
 gbbs start_if_MHz end_if_MHz sr_min sr_max pol(0=H,1=V) band(0=low,1=high) nim_socket
 gbbs probe          # list /dev/blindscan* and which path each NIM uses
+gbbs reset 9        # stop a seek left running on NIM 9 by a killed scan
 ```
 
 Each carrier is printed as one line in the vuplus_blindscan format:
@@ -77,9 +78,9 @@ pass from 1 MS/s up (unchanged), then a separate pass from `sr_min` to
 engine for 1 MS/s and up never reports narrower carriers, so passing `1`
 from a plugin hides them.
 
-The firmware seek detects narrow carriers only some of the time, and a
-stalled seek loses the rest of its span. So the second pass seeks in short
-overlapping chunks (`GBBS_LOWSR_CHUNK`, default 40 MHz), and can be repeated
+The second pass covers the whole span in one seek by default; restarting
+the driver's seek thread per chunk proved fragile. `GBBS_LOWSR_CHUNK=MHz`
+still splits it into overlapping chunks, and the pass can be repeated
 (`GBBS_LOWSR_REPEAT`, default 1).
 
 A seek step that returns nothing within `GBBS_TIMEOUT` / `GBBS_LOWSR_TIMEOUT`
@@ -132,3 +133,11 @@ version 2 only (GPL-2.0-only). See [LICENSE](LICENSE).
 A prebuilt static ARMv7 binary is attached to each
 [release](../../releases). Copy it to `/usr/bin/gbbs` on the receiver and make
 it executable.
+
+## Stopping a scan
+
+gbbs stops the seek on SIGINT/SIGTERM/SIGHUP. If it is killed outright
+(SIGKILL - enigma2's eConsoleAppContainer does this when a plugin drops it)
+the driver's seek thread keeps running and the tuner has no signal until a
+reboot. Run `gbbs reset <nim_socket>` after killing it; the TNAP Blindscan
+plugin does this when a scan is cancelled.

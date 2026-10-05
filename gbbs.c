@@ -4,7 +4,7 @@
  * Licensed under the GNU General Public License, version 2 only (GPL-2.0-only).
  * See the LICENSE file in the source tree.
  *
- * gbbs v4.2 - open replacement for GigaBlue's closed "gigablue_blindscan" wrapper.
+ * gbbs v4.3 - open replacement for GigaBlue's closed "gigablue_blindscan" wrapper.
  *
  * Reverse engineered from gigablue-blindscan-dvbs-utils-arm 4.0-r13 and the GigaBlue
  * 7252 dvb.ko (BuildID e7395bbeb437a240...). The work is done in dvb.ko's
@@ -28,6 +28,7 @@
  * Command line (as sent by the OE-A Blindscan plugin):
  *   gbbs start_if end_if sr_min sr_max pol(0=H 1=V) band(0=lo 1=hi) feid [i2c...]
  *   gbbs probe
+ *   gbbs reset nim_socket   (stop a seek a killed run left running)
  * sr_min / sr_max are Msps and may be decimal (0.3 = 300 ks/s).
  * Sockets named TS3L10/TS2L08 use the SiLabs seek engine (see seek_scan below);
  * FBC/BCM sockets use the Nexus peak-scan path.
@@ -37,7 +38,8 @@
  *   GBBS_KICKS=n    seek path: resumes before a stalled pass is abandoned (default 3)
  *   GBBS_SRMIN_KSPS=k  seek path: override the minimum symbol rate in ks/s (e.g. 250)
  *   GBBS_LOWSR=0    seek path: don't run the separate sub-1 Msps pass
- *   GBBS_LOWSR_CHUNK=MHz    sub-1 Msps pass: seek this many MHz at a time (default 40)
+ *   GBBS_LOWSR_CHUNK=MHz    sub-1 Msps pass: seek this many MHz at a time
+ *                           (default 0 = whole span in one pass)
  *   GBBS_LOWSR_TIMEOUT=s    sub-1 Msps pass: as GBBS_TIMEOUT, for the low pass (default 125)
  *   GBBS_LOWSR_REPEAT=n     sub-1 Msps pass: run the whole low pass n times (default 1)
  *   GBBS_STEP=MHz   step between peak-scan centres (default 2)
@@ -235,7 +237,7 @@ static int seek_pass(int fd, int fe, int start, int end, unsigned srmin, unsigne
 	if (dbg)
 		fprintf(stderr, "gbbs: SEEK pass fe %d IF %d-%d MHz SR %u-%u ks/s\n",
 		        fe, start, end, srmin / 1000, srmax / 1000);
-	sleep(1);
+	sleep(2);                      /* let the driver tear down the previous seek thread */
 	ret = ioctl(fd, SEEK_START, &req);
 	if (ret != 1) {
 		fprintf(stderr, "gbbs: seek start on fe %d returned %d (%s)\n", fe, ret,
@@ -359,11 +361,14 @@ static int seek_scan(int fe, const char *name, int start, int end, unsigned srmi
 		 * pass works in short overlapping chunks, each with its own Seek_Init
 		 * and a shorter stall limit, optionally repeated; dedup keeps the
 		 * output clean. */
-		int chunk = 40, ltimeout = 125, repeat = 1, rep, c;
+		int chunk = 0, ltimeout = 125, repeat = 1, rep, c;
 		if ((e = getenv("GBBS_LOWSR_CHUNK")) != NULL) chunk = atoi(e);
 		if ((e = getenv("GBBS_LOWSR_TIMEOUT")) != NULL) ltimeout = atoi(e);
 		if ((e = getenv("GBBS_LOWSR_REPEAT")) != NULL) repeat = atoi(e);
-		if (chunk < 4) chunk = 4;
+		if (chunk <= 0 || chunk > end - start)
+			chunk = end - start;     /* default: one pass, no thread restarts */
+		else if (chunk < 4)
+			chunk = 4;
 		if (ltimeout < 5) ltimeout = 5;
 		if (repeat < 1) repeat = 1;
 
@@ -416,13 +421,33 @@ int main(int argc, char **argv)
 
 	if (argc == 2 && !strcmp(argv[1], "probe"))
 		return probe();
+	if (argc >= 2 && !strcmp(argv[1], "reset")) {
+		/* Recover a tuner left in SiLabs seek mode by a killed scan (no signal
+		 * until reboot otherwise). Same as what every seek run does first. */
+		int nim = argc > 2 ? atoi(argv[2]) : ((e = getenv("GBBS_FE")) ? atoi(e) : -1);
+		if (nim < 0) {
+			fprintf(stderr, "usage: %s reset <nim_socket>\n", argv[0]);
+			return 1;
+		}
+		int fd = open("/dev/blindscan0", O_RDWR);
+		if (fd < 0) {
+			fprintf(stderr, "gbbs: open /dev/blindscan0: %s\n", strerror(errno));
+			return 1;
+		}
+		ioctl(fd, SEEK_SELECT, (unsigned long)nim);
+		int r = ioctl(fd, SEEK_STOP);
+		close(fd);
+		printf("gbbs: seek stopped on NIM %d (%d)\n", nim, r);
+		return 0;
+	}
 	if (argc == 2 && (!strcmp(argv[1], "-h") || !strcmp(argv[1], "--help"))) {
 		fprintf(stderr, "usage: %s start_if end_if srmin srmax pol(0=H,1=V) band(0=lo,1=hi) feid\n"
 		                "       %s probe\n"
+		                "       %s reset nim_socket\n"
 		                "       srmin/srmax in Msps, decimals allowed (0.3 = 300 ks/s)\n"
 		                "env:   GBBS_SRMIN_KSPS=k GBBS_LOWSR=0 GBBS_TIMEOUT=s GBBS_STEP=MHz\n"
 		                "       GBBS_LOWSR_CHUNK=MHz GBBS_LOWSR_TIMEOUT=s GBBS_LOWSR_REPEAT=n GBBS_KICKS=n\n"
-		                "       GBBS_FE=n GBBS_FORCE=1 GBBS_DEBUG=1\n", argv[0], argv[0]);
+		                "       GBBS_FE=n GBBS_FORCE=1 GBBS_DEBUG=1\n", argv[0], argv[0], argv[0]);
 		return 1;
 	}
 	if (argc > 1) start = atoi(argv[1]);
