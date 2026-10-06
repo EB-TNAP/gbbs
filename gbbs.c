@@ -4,7 +4,7 @@
  * Licensed under the GNU General Public License, version 2 only (GPL-2.0-only).
  * See the LICENSE file in the source tree.
  *
- * gbbs v4.3 - open replacement for GigaBlue's closed "gigablue_blindscan" wrapper.
+ * gbbs v4.4 - open replacement for GigaBlue's closed "gigablue_blindscan" wrapper.
  *
  * Reverse engineered from gigablue-blindscan-dvbs-utils-arm 4.0-r13 and the GigaBlue
  * 7252 dvb.ko (BuildID e7395bbeb437a240...). The work is done in dvb.ko's
@@ -167,10 +167,14 @@ static int seen(unsigned f_khz, unsigned sr)
 		unsigned half = (hits[i].sr > sr ? hits[i].sr : sr) / 2000; /* kHz */
 		unsigned d = f_khz > hits[i].f_khz ? f_khz - hits[i].f_khz : hits[i].f_khz - f_khz;
 		unsigned dsr = hits[i].sr > sr ? hits[i].sr - sr : sr - hits[i].sr;
-		/* The seek engine reports whole MHz, so the same narrow carrier can
-		 * come back 1 MHz apart (11852 / 11853 at 593 kS/s). Same SR within
-		 * 2% and <= 1 MHz apart is the same carrier. */
-		if (dsr * 50 <= sr && half < 1000)
+		/* The vendor dvb.ko rounds seek hits to whole MHz, so the same narrow
+		 * carrier can come back 1 MHz apart (11852 / 11853 at 593 kS/s): same
+		 * SR within 2% and <= 1 MHz apart is the same carrier. With
+		 * patch-dvb-seekfreq.py the driver reports kHz, and two SCPC
+		 * carriers less than 1 MHz apart must stay separate, so the 1 MHz
+		 * rule only applies when both hits are whole MHz. */
+		if (dsr * 50 <= sr && half < 1000 &&
+		    f_khz % 1000 == 0 && hits[i].f_khz % 1000 == 0)
 			half = 1000;
 		if (d <= half)
 			return 1;
@@ -196,7 +200,8 @@ static int seen(unsigned f_khz, unsigned sr)
  *   0x72 SEEK_RESULT  1 = result copied, 0 = still seeking, -1 = scan finished
  *                     out: same 8 words as the peak path, then u8 n_isi @0x20,
  *                     u32 isi[] @0x24 (only for multistream); struct is 0x1410 bytes
- * Seek_Next reports frequency rounded to whole MHz.
+ * The vendor TS3L10/TS2L08_Seek_Next round the SiLabs kHz result to whole MHz;
+ * patch-dvb-seekfreq.py removes that rounding.
  * ------------------------------------------------------------------------------ */
 #define SEEK_SELECT 0x6e
 #define SEEK_START  0x6f
