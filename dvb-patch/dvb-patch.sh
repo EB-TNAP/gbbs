@@ -4,19 +4,23 @@
 # gbbs works with the stock dvb.ko (1-45 MS/s, frequencies in whole MHz).
 # Each patch below is optional; nothing is changed unless it is asked for.
 #
-#   --srmin[=MIN:MAX]  symbol-rate range 1..45 MS/s -> MIN..MAX in S/s
-#                      (default 100000:60000000): tune carriers below 1 MS/s
+#   --srmin[=MIN[:MAX]] symbol-rate range 1..45 MS/s -> MIN..MAX in S/s
+#                      (default 100000:60000000; --srmin=250000 sets only MIN): tune carriers below 1 MS/s
 #                      or above 45 MS/s, and keep the range after a scan stops
 #   --snr              SNR meter keeps moving below 6.75 dB (vendor: fixed 40 %)
 #   --seekfreq         blindscan frequencies in kHz instead of whole MHz
 #   --all              all three
-#   --check            report the state of every patch, change nothing
-#   --restore          put the vendor module back from the backup
+#   --check            report the state of the selected patches (all if none
+#                      selected), change nothing; exit 1 unless every one is
+#                      applied
+#   --restore          put the vendor module back from the backup (also reads
+#                      the .gb7252-pnp.orig copy of the gb7252-pnp-blindscan ipk)
 #
 # Usage: dvb-patch.sh [options] dvb.ko [dvb.ko ...]
 #
 # A copy of the vendor module is kept as <dvb.ko>.gbbs-orig before the first
-# change. Each patcher finds its target by pattern and leaves a module it does
+# change, unless the module already carries a patch (then there is no vendor
+# copy to keep and --restore is not possible). Each patcher finds its target by pattern and leaves a module it does
 # not recognise untouched. Exit status: 0 ok, 1 error / not recognised.
 
 dir=$(dirname "$0")
@@ -31,7 +35,13 @@ for a in "$@"; do
 	--srmin)   do_srmin=1 ;;
 	--srmin=*) do_srmin=1
 		r=${a#--srmin=}
-		srmin_args="--min ${r%%:*} --max ${r##*:}" ;;
+		case "$r" in
+		*:*) min=${r%%:*} max=${r#*:}
+			srmin_args=
+			[ -n "$min" ] && srmin_args="--min $min"
+			[ -n "$max" ] && srmin_args="$srmin_args --max $max" ;;
+		*) srmin_args="--min $r" ;;
+		esac ;;
 	--snr)      do_snr=1 ;;
 	--seekfreq) do_seekfreq=1 ;;
 	--all)      do_srmin=1 do_snr=1 do_seekfreq=1 ;;
@@ -54,14 +64,23 @@ for ko in "$@"; do
 	fi
 	case $mode in
 	check)
-		for p in srmin snr seekfreq; do
+		sel=
+		[ $do_srmin -eq 1 ]    && sel="$sel srmin"
+		[ $do_snr -eq 1 ]      && sel="$sel snr"
+		[ $do_seekfreq -eq 1 ] && sel="$sel seekfreq"
+		[ -n "$sel" ] || sel="srmin snr seekfreq"
+		for p in $sel; do
 			echo "== $p"
-			$PY "$dir/patch-dvb-$p.py" "$ko" --check
+			$PY "$dir/patch-dvb-$p.py" "$ko" --check || rc=1
 		done
 		continue ;;
 	restore)
-		if [ -f "$ko.gbbs-orig" ]; then
-			cp -p "$ko.gbbs-orig" "$ko" && echo "restored $ko"
+		bak=
+		for b in "$ko.gbbs-orig" "$ko.gb7252-pnp.orig"; do
+			[ -f "$b" ] && { bak=$b; break; }
+		done
+		if [ -n "$bak" ]; then
+			cp -p "$bak" "$ko" && echo "restored $ko"
 		else
 			echo "dvb-patch.sh: $ko: no $ko.gbbs-orig backup" >&2
 			rc=1
@@ -76,7 +95,15 @@ for ko in "$@"; do
 	[ $do_snr -eq 1 ]      && { $PY "$dir/patch-dvb-snr.py" "$tmp" >/dev/null || ok=0; }
 	[ $do_seekfreq -eq 1 ] && { $PY "$dir/patch-dvb-seekfreq.py" "$tmp" >/dev/null || ok=0; }
 	if [ $ok -eq 1 ]; then
-		[ -f "$ko.gbbs-orig" ] || cp -p "$ko" "$ko.gbbs-orig"
+		if [ ! -f "$ko.gbbs-orig" ] && [ ! -f "$ko.gb7252-pnp.orig" ]; then
+			if $PY "$dir/patch-dvb-snr.py" "$ko" --check >/dev/null 2>&1 || \
+			   $PY "$dir/patch-dvb-seekfreq.py" "$ko" --check >/dev/null 2>&1 || \
+			   $PY "$dir/patch-dvb-srmin.py" "$ko" --check >/dev/null 2>&1; then
+				echo "dvb-patch.sh: $ko already carries a patch; no vendor copy kept" >&2
+			else
+				cp -p "$ko" "$ko.gbbs-orig"
+			fi
+		fi
 		mv -f "$tmp" "$ko" && echo "patched $ko"
 	else
 		rm -f "$tmp"
