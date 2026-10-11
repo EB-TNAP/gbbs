@@ -8,7 +8,9 @@ that is already inside GigaBlue's `dvb.ko` but was never used by anything in
 userspace.
 
 Tested on a GigaBlue UE 4K (BCM7252s) under OpenViX and TNAP: a full
-950–2150 MHz pass on one polarisation takes about two minutes.
+950–2150 MHz pass on one polarisation takes about two minutes. With `sr_min`
+below 1 MS/s the extra low-rate pass (see below) adds several minutes: 4–10
+minutes per polarisation over the full span in total.
 
 ## Why
 
@@ -93,46 +95,24 @@ Tuning what the second pass finds needs GigaBlue's `dvb.ko` patched to lower
 its registered `symbol_rate_min` (vendor value 1000000); otherwise the kernel
 rejects the tune with `symbol rate … out of range`.
 
-Environment: `GBBS_DEBUG=1` (trace on stderr), `GBBS_TIMEOUT=s` (seek path,
-seconds without a result before resuming, default 125), `GBBS_KICKS=n`, `GBBS_SRMIN_KSPS=k` (seek path, override the
-minimum symbol rate in kS/s), `GBBS_LOWSR=0` (skip the sub-1 MS/s pass),
-`GBBS_STEP=MHz`, `GBBS_FE=n`, `GBBS_FORCE=1` (peak-scan path).
+Environment:
 
-## Build
+| Variable | Meaning |
+|---|---|
+| `GBBS_DEBUG=1` | trace on stderr |
+| `GBBS_TIMEOUT=s` | seek path: seconds without a result before resuming (default 125, minimum 5) |
+| `GBBS_KICKS=n` | how many times a stalled seek is resumed (default 3) |
+| `GBBS_STEP=MHz` | seek step |
+| `GBBS_SRMIN_KSPS=k` | seek path: override the minimum symbol rate in kS/s |
+| `GBBS_LOWSR=0` | skip the sub-1 MS/s pass |
+| `GBBS_LOWSR_CHUNK=MHz` | split the sub-1 MS/s pass into overlapping chunks (default: one pass) |
+| `GBBS_LOWSR_TIMEOUT=s` | as `GBBS_TIMEOUT`, for the sub-1 MS/s pass (default 125, minimum 5) |
+| `GBBS_LOWSR_REPEAT=n` | repeat the sub-1 MS/s pass (default 1) |
+| `GBBS_FE=n` | frontend / NIM socket (overrides the argument) |
+| `GBBS_FORCE=1` | peak-scan path on a tuner gbbs would refuse |
 
-```
-make CROSS_COMPILE=arm-linux-gnueabihf- STATIC=1
-```
-
-This produces a stripped static ARMv7 binary with no runtime dependencies.
-Install it as `/usr/bin/gbbs`.
-
-## Plugin integration
-
-- OE-Alliance `SystemPlugins/Blindscan`: route NIMs whose description contains
-  `TS3L10` or `TS2L08` on GigaBlue boxes to `/usr/bin/gbbs`, and skip the i2c
-  lookup for them. The plugin's `/proc/bus/nim_sockets` parser cannot parse the
-  name `GIGA DVB-S2X NIM (TS3L10)`.
-- TNAP Blindscan: integrated, with live display of carriers as they are found
-  and a `/tmp/gbbs_*.txt` list that keeps the DVB-S2X identity.
-
-## Limitations
-
-- Frequencies from the seek engine are rounded to whole MHz by the driver.
-- PLS codes are not reported, so scrambled-PLS multistream will not lock.
-- The FBC peak-scan path is limited by the driver to large-SR carriers. The
-  FBC tuners are better left excluded from blindscan.
-
-## License
-
-gbbs is free software, licensed under the GNU General Public License,
-version 2 only (GPL-2.0-only). See [LICENSE](LICENSE).
-
-## Download
-
-A prebuilt static ARMv7 binary is attached to each
-[release](../../releases). Copy it to `/usr/bin/gbbs` on the receiver and make
-it executable.
+Run with no arguments (or `-h`), gbbs prints this usage and exits; it does
+not start a scan.
 
 ## Stopping a scan
 
@@ -150,14 +130,15 @@ whole MHz. Three optional patches for the prebuilt module live in
 
 | Option | Stock `dvb.ko` | Patched |
 |---|---|---|
-| `srmin` | symbol-rate range 1..45 MS/s, restored after a scan stops | 0.1..60 MS/s (or `MIN:MAX`), kept after a scan |
+| `srmin` | symbol-rate range 1..45 MS/s, restored after a scan stops | 0.1..60 MS/s (or `MIN[:MAX]`), kept after a scan |
 | `snr` | SNR meter frozen at 40 % below 6.75 dB | meter keeps moving |
 | `seekfreq` | blindscan frequencies rounded to whole MHz | kHz |
 
 ```
-dvb-patch/dvb-patch.sh --check dvb.ko                 # report only
+dvb-patch/dvb-patch.sh --check dvb.ko                 # report only; exit 1 unless all applied
 dvb-patch/dvb-patch.sh --srmin --seekfreq dvb.ko      # any subset, or --all
 dvb-patch/dvb-patch.sh --srmin=250000:45000000 dvb.ko
+dvb-patch/dvb-patch.sh --srmin=250000 dvb.ko          # MIN only; MIN:MAX and :MAX also work
 dvb-patch/dvb-patch.sh --restore dvb.ko               # from dvb.ko.gbbs-orig
 make patch-dvb DVB_KO=dvb.ko DVB_PATCHES="srmin snr"
 ```
@@ -166,3 +147,59 @@ Each patcher finds its target by pattern and leaves a module it does not
 recognise untouched. Image builders can apply a chosen subset to the rootfs
 with `oe/gbbs-dvb-patch.bbclass` (`GBBS_DVB_PATCHES = "srmin snr seekfreq"`;
 empty means no change).
+
+`srmin` widens the range of all five satellite frontends the module registers,
+not only the plug-and-play tuners: `GIGA DVB-S2X NIM` (TS3L10 and TS2L08),
+`GIGA DVB-S2 NIM`, the internal `BCM7439 DVB-S2 NIM` and the vTuner proxy
+frontend. The vendor module is saved as `dvb.ko.gbbs-orig` before the first
+change; if the module already carries a patch, no copy is kept and `--restore`
+is not possible. `--restore` also accepts the `.gb7252-pnp.orig` copy of the
+`gb7252-pnp-blindscan` package.
+
+In an OE image, `oe/gbbs-dvb-patch.bbclass` needs the
+`oe/gbbs-dvb-patch-native.bb` recipe (copy both into a layer and pin its
+`SRCREV`); the class then finds the tools in the native sysroot.
+
+## Build
+
+```
+make CROSS_COMPILE=arm-linux-gnueabihf- STATIC=1
+```
+
+This produces a stripped static ARMv7 binary with no runtime dependencies.
+Install it as `/usr/bin/gbbs`.
+
+Without `STATIC=1` and `CROSS_COMPILE`, `make` builds for the host. An image
+recipe should compile `gbbs.c` with the OE toolchain (`${CC} ${CFLAGS}
+${LDFLAGS} gbbs.c -o gbbs`) and install the result as `/usr/bin/gbbs`.
+
+## Plugin integration
+
+- OE-Alliance `Blindscan` plugin: routes NIMs whose description contains
+  `TS3L10` or `TS2L08` on GigaBlue boxes to `/usr/bin/gbbs`, and skips the i2c
+  lookup for them. This is in the upstream plugin
+  ([oe-alliance-plugins/Blindscan](https://github.com/oe-alliance-plugins/Blindscan),
+  commit 6b8de23); a cancelled scan ends gbbs with Ctrl-C, which it handles.
+- OE-Alliance builds gbbs from this repository for the `gb7252` machines
+  (`gbbs_git.bb` in `meta-gigablue`).
+- TNAP Blindscan: integrated, with live display of carriers as they are found
+  and a `/tmp/gbbs_*.txt` list that keeps the DVB-S2X identity.
+
+## Limitations
+
+- Frequencies from the seek engine are rounded to whole MHz by the stock
+  driver, unless the `seekfreq` patch is applied (see Optional dvb.ko patches).
+- PLS codes are not reported, so scrambled-PLS multistream will not lock.
+- The FBC peak-scan path is limited by the driver to large-SR carriers. The
+  FBC tuners are better left excluded from blindscan.
+
+## License
+
+gbbs is free software, licensed under the GNU General Public License,
+version 2 only (GPL-2.0-only). See [LICENSE](LICENSE).
+
+## Download
+
+A prebuilt static ARMv7 binary is attached to each
+[release](../../releases). Copy it to `/usr/bin/gbbs` on the receiver and make
+it executable.
