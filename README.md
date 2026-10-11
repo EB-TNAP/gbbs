@@ -141,3 +141,28 @@ gbbs stops the seek on SIGINT/SIGTERM/SIGHUP. If it is killed outright
 the driver's seek thread keeps running and the tuner has no signal until a
 reboot. Run `gbbs reset <nim_socket>` after killing it; the TNAP Blindscan
 plugin does this when a scan is cancelled.
+
+## Optional dvb.ko patches
+
+gbbs works with the stock GigaBlue `dvb.ko`: 1 to 45 MS/s, frequencies in
+whole MHz. Three optional patches for the prebuilt module live in
+`dvb-patch/`; none is applied unless asked for, and each is independent:
+
+| Option | Stock `dvb.ko` | Patched |
+|---|---|---|
+| `srmin` | symbol-rate range 1..45 MS/s, restored after a scan stops | 0.1..60 MS/s (or `MIN:MAX`), kept after a scan |
+| `snr` | SNR meter frozen at 40 % below 6.75 dB | meter keeps moving |
+| `seekfreq` | blindscan frequencies rounded to whole MHz | kHz |
+
+```
+dvb-patch/dvb-patch.sh --check dvb.ko                 # report only
+dvb-patch/dvb-patch.sh --srmin --seekfreq dvb.ko      # any subset, or --all
+dvb-patch/dvb-patch.sh --srmin=250000:45000000 dvb.ko
+dvb-patch/dvb-patch.sh --restore dvb.ko               # from dvb.ko.gbbs-orig
+make patch-dvb DVB_KO=dvb.ko DVB_PATCHES="srmin snr"
+```
+
+Each patcher finds its target by pattern and leaves a module it does not
+recognise untouched. Image builders can apply a chosen subset to the rootfs
+with `oe/gbbs-dvb-patch.bbclass` (`GBBS_DVB_PATCHES = "srmin snr seekfreq"`;
+empty means no change).
