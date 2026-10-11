@@ -4,7 +4,6 @@
 # local.conf or the image recipe:
 #
 #   IMAGE_CLASSES += "gbbs-dvb-patch"
-#   GBBS_DVB_PATCH_DIR = "/path/to/gbbs/dvb-patch"
 #   GBBS_DVB_PATCHES = "srmin snr seekfreq"      # any subset, or leave empty
 #   GBBS_DVB_SRMIN = "250000:45000000"           # optional MIN:MAX in S/s
 #
@@ -12,16 +11,20 @@
 # snr       SNR meter keeps moving below 6.75 dB
 # seekfreq  blindscan frequencies in kHz instead of whole MHz
 
-GBBS_DVB_PATCH_DIR ?= ""
+# The tools come from the gbbs-dvb-patch-native recipe (oe/ in the gbbs
+# repo; copy it into a layer). Override GBBS_DVB_PATCH_DIR to use a checkout.
+GBBS_DVB_PATCH_DIR ?= "${STAGING_BINDIR_NATIVE}"
 GBBS_DVB_PATCHES ?= ""
 GBBS_DVB_SRMIN ?= ""
+
+do_rootfs[depends] += "${@'gbbs-dvb-patch-native:do_populate_sysroot python3-native:do_populate_sysroot' if d.getVar('GBBS_DVB_PATCHES') else ''}"
 
 ROOTFS_POSTPROCESS_COMMAND:append = " gbbs_dvb_patch;"
 
 gbbs_dvb_patch() {
     [ -n "${GBBS_DVB_PATCHES}" ] || return 0
     if [ ! -x "${GBBS_DVB_PATCH_DIR}/dvb-patch.sh" ]; then
-        bbfatal "GBBS_DVB_PATCH_DIR must point at the gbbs dvb-patch directory (dvb-patch.sh not found)"
+        bbfatal "dvb-patch.sh not found in ${GBBS_DVB_PATCH_DIR} (is gbbs-dvb-patch-native available?)"
     fi
     opts=""
     for p in ${GBBS_DVB_PATCHES}; do
