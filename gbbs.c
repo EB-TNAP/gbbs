@@ -4,7 +4,7 @@
  * Licensed under the GNU General Public License, version 2 only (GPL-2.0-only).
  * See the LICENSE file in the source tree.
  *
- * gbbs v4.4 - open replacement for GigaBlue's closed "gigablue_blindscan" wrapper.
+ * gbbs v4.5 - open replacement for GigaBlue's closed "gigablue_blindscan" wrapper.
  *
  * Reverse engineered from gigablue-blindscan-dvbs-utils-arm 4.0-r13 and the GigaBlue
  * 7252 dvb.ko (BuildID e7395bbeb437a240...). The work is done in dvb.ko's
@@ -341,6 +341,7 @@ static int seek_scan(int fe, const char *name, int start, int end, unsigned srmi
 	double t0 = now();
 
 	if ((e = getenv("GBBS_TIMEOUT")) != NULL) timeout = atoi(e);
+	if (timeout < 5) timeout = 5;
 	signal(SIGINT, on_sig);
 	signal(SIGTERM, on_sig);
 	signal(SIGHUP, on_sig);
@@ -445,7 +446,9 @@ int main(int argc, char **argv)
 		printf("gbbs: seek stopped on NIM %d (%d)\n", nim, r);
 		return 0;
 	}
-	if (argc == 2 && (!strcmp(argv[1], "-h") || !strcmp(argv[1], "--help"))) {
+	/* The stock helper prints usage when run bare; do not start a full scan. */
+	if ((argc == 2 && (!strcmp(argv[1], "-h") || !strcmp(argv[1], "--help"))) ||
+	    (argc == 1 && !getenv("GBBS_FE"))) {
 		fprintf(stderr, "usage: %s start_if end_if srmin srmax pol(0=H,1=V) band(0=lo,1=hi) feid\n"
 		                "       %s probe\n"
 		                "       %s reset nim_socket\n"
